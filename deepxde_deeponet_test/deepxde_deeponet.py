@@ -16,6 +16,7 @@ data = dde.data.TripleCartesianProd(
     X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test
 )
 
+print(X_test[0].shape, X_test[1].shape, y_test.shape)
 # Choose a network
 m = 100
 dim_x = 1
