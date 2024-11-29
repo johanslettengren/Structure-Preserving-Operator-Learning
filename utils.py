@@ -8,16 +8,14 @@ import matplotlib.pyplot as plt
 
 # Define network class (we use the same base structure for both branch and trunk)
 class Network(nn.Module):
-    def __init__(self, layer_sizes, kernel_initializer=None):
+    def __init__(self, layer_sizes):
         super().__init__()
-        
-    
 
         self.linears = torch.nn.ModuleList()
         for i in range(1, len(layer_sizes)):
             self.linears.append(torch.nn.Linear(layer_sizes[i - 1], layer_sizes[i]))
-            torch.nn.init.xavier_normal_(self.linears[-1].weight)
-            torch.nn.init.zeros_(self.linears[-1].bias)
+            #torch.nn.init.xavier_normal_(self.linears[-1].weight)
+            #torch.nn.init.zeros_(self.linears[-1].bias)
         
     def forward(self, inputs):
         x = inputs
@@ -28,24 +26,32 @@ class Network(nn.Module):
     
     
 class DeepONet(nn.Module):
-    def __init__(self, layer_sizes_branch, layer_sizes_trunk, kernel_initializer=None):
+    def __init__(self, layer_sizes_branch, layer_sizes_trunk, dim_out):
         super(DeepONet, self).__init__()
         
+        #self.branches = torch.nn.ModuleList()
+        #self.trunks = torch.nn.ModuleList()
+        
+        self.dim_out = dim_out
+        
         # Initialize branch and trunk networks
-        self.branch = Network(layer_sizes_branch, kernel_initializer)
-        self.trunk = Network(layer_sizes_trunk, kernel_initializer)
+        self.branches = torch.nn.ModuleList([Network(layer_sizes_branch) for _ in range(self.dim_out)]) 
+        self.trunks =  torch.nn.ModuleList([Network(layer_sizes_trunk) for _ in range(self.dim_out)]) 
         
         # bias term
-        self.bias = nn.Parameter(torch.zeros(1))
+        self.bias = nn.Parameter(torch.zeros(self.dim_out, 1))
 
     
     def forward(self, x_func, x_loc):
+        
         # Forward pass through the networks
-        branch_output = self.branch(x_func)
-        trunk_output = self.trunk(x_loc)
+        branch_outputs = torch.stack([branch(x_func) for branch in self.branches], dim=0)
+        trunk_outputs = torch.stack([trunk(x_loc) for trunk in self.trunks], dim=0)
         
         # Combine the outputs
-        output = torch.sum(branch_output * trunk_output, dim=1) + self.bias
+        #output = torch.sum(branch_outputs * trunk_outputs, dim=2) + self.bias
+        output = torch.einsum('ijk,ijk->ij', branch_outputs, trunk_outputs) + self.bias
+        
         return output
 
 
@@ -58,9 +64,14 @@ class Model():
         X_test = self.format_data(x_test[0], x_test[1])
         
         self.sensors = x_train[0].shape[1]
+        self.num_training = x_train[0].shape[0] * x_train[1].shape[0]
+        self.num_testing = x_test[0].shape[0] * x_test[1].shape[0]
         
-        self.train_dataset = TensorDataset(X_train, torch.tensor(y_train, dtype=torch.float32).flatten()) 
-        self.test_dataset = TensorDataset(X_test, torch.tensor(y_test, dtype=torch.float32).flatten()) 
+        y_train_ = torch.tensor(y_train, dtype=torch.float32).flatten(start_dim=1, end_dim=2).T
+        y_test_ = torch.tensor(y_test, dtype=torch.float32).flatten(start_dim=1, end_dim=2).T
+                
+        self.train_dataset = TensorDataset(X_train, y_train_) 
+        self.test_dataset = TensorDataset(X_test, y_test_) 
 
         self.net = net
         self.vlosshistory = []
@@ -79,22 +90,26 @@ class Model():
         n_y = y_tensor.shape[0]
 
         # Compute all combinations
-        x_expanded = x_tensor.unsqueeze(1)# Shape: [100, 1, 2]
-        y_expanded = y_tensor.unsqueeze(0) # Shape: [1, 100, 2]
-        combinations = torch.cat((x_expanded.expand(n_x, n_y, -1), y_expanded.expand(n_x, n_y, -1)), dim=-1)        
+        x_expanded = x_tensor.unsqueeze(1)
+        y_expanded = y_tensor.unsqueeze(0)
+        combinations = torch.cat((x_expanded.expand(n_x, n_y, -1), y_expanded.expand(n_x, n_y, -1)), dim=-1)     
         X = combinations.flatten(start_dim=0, end_dim=1) 
+        
         return X
                 
     def train_one_epoch(self):
             
             running_loss = 0.
             iter = 0
-            for i, data in enumerate(self.train_loader):
+            for data in self.train_loader:
+                
 
                 inputs, targets = data
+                
                 self.optimizer.zero_grad()
-                outputs = self.net(inputs[:, :self.sensors], inputs[:, self.sensors:])
-                loss = self.loss_fn(outputs, targets)
+                outputs = self.net(inputs[:, :self.sensors], inputs[:, self.sensors:])            
+                
+                loss = self.loss_fn(outputs, targets.T)
                 loss.backward()
                 self.optimizer.step()
                 running_loss += loss.item()
@@ -107,8 +122,11 @@ class Model():
         
     def train(self, epochs, batch_size):
         
-        self.train_loader = DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True) # create your dataloader
-        self.test_loader = DataLoader(self.test_dataset, batch_size=batch_size, shuffle=True) # create your dataloader
+        test_batch = self.num_training if batch_size is None else batch_size
+        train_batch = self.num_training if batch_size is None else batch_size
+        
+        self.train_loader = DataLoader(self.train_dataset, batch_size=test_batch, shuffle=True)
+        self.test_loader = DataLoader(self.test_dataset, batch_size=train_batch, shuffle=True)
 
         
         self.epochs = []
@@ -133,7 +151,7 @@ class Model():
                     for i, vdata in enumerate(self.test_loader):
                         vinputs, vtargets = vdata
                         voutputs = self.net(vinputs[:, :self.sensors], vinputs[:, self.sensors:])
-                        vloss = self.loss_fn(voutputs, vtargets)
+                        vloss = self.loss_fn(voutputs, vtargets.T)
                         running_vloss += vloss
                         iter += 1
                 
