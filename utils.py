@@ -68,17 +68,20 @@ class DeepONet(torch.nn.Module):
 # Compile and train model + data
 class Model():
     
-    def __init__(self, x_train, y_train, x_test, y_test, net, optimizer='adam', loss_fn=torch.nn.MSELoss(), lr=0.001):     
+    def __init__(
+        self, x_train, y_train, x_test, y_test, net, 
+        optimizer='adam', lr=0.001, Px=None, PI_loss_fn=None):     
         
         # Training data
-        self.x_func_train = self.format(x_train[0])
-        self.x_loc_train = self.format(x_train[1])
+        self.x_train = (self.format(x_train[0]), self.format(x_train[1]))
         self.y_train = self.format(y_train)
         
         # Testing data
-        self.x_func_test = self.format(x_test[0])
-        self.x_loc_test = self.format(x_test[1])
+        self.x_test = (self.format(x_test[0]), self.format(x_test[1]))
         self.y_test = self.format(y_test)
+        
+        self.Px_func = self.format(Px[0], requires_grad=True) if Px is not None else None
+        self.Px_loc = self.format(Px[1], requires_grad=True) if Px is not None else None
         
         # Network
         self.net = net
@@ -92,15 +95,29 @@ class Model():
         self.optimizer = optimizer(net.parameters(), lr=lr)
         
         # Set loss function (MSE default)
-        self.loss_fn = loss_fn
+        self.mse = torch.nn.MSELoss()
+        self.PI_loss_fn = PI_loss_fn
+        
+        self.loss_fn = self.MSE_loss if PI_loss_fn is None else self.PINN_loss
         
         
     # Format data as torch tensor with dtype=float32    
-    def format(self, x):
+    def format(self, x, requires_grad=False):
         x = x if isinstance(x, torch.Tensor) else torch.tensor(x)
-        return x.to(torch.float32)
+        return x.to(torch.float32).requires_grad_(requires_grad)
     
-                        
+    def MSE_loss(self, prediction, targets):
+        return self.mse(prediction, targets)
+    
+    def PINN_loss(self, prediction, targets):
+        
+        torch.set_grad_enabled(True)
+        # Calculate physics informed loss
+        u = self.net(self.Px_func, self.Px_loc)
+        Ploss = self.PI_loss_fn(u, self.Px_loc)
+        Ploss = self.mse(Ploss, torch.zeros_like(Ploss))
+        return self.mse(prediction, targets) + Ploss
+        
         
     # Train network
     def train(self, iterations):
@@ -116,10 +133,16 @@ class Model():
 
         for iter in range(iterations):
             
+                        
+            # Physics informed loss
+            #u = self.net(self.Px_func, self.Px_loc)
+            #Ploss = self.PI_loss_fn(u, self.Px_loc)
+            #Ploss = self.loss_fn(Ploss, torch.zeros_like(Ploss))
+            #loss = self.loss_fn(prediction, self.y_train) + Ploss
             
             # Train
             self.optimizer.zero_grad()
-            prediction = self.net(self.x_func_train, self.x_loc_train)   
+            prediction = self.net(*self.x_train)
             loss = self.loss_fn(prediction, self.y_train)
             loss.backward()
             self.optimizer.step()
@@ -129,9 +152,10 @@ class Model():
             if iter % 1000 == 999:
                 # Set net to evalutation mode
                 self.net.eval()
+                
                 # Don't calculate gradients
                 with torch.no_grad():
-                    outputs = self.net(self.x_func_test, self.x_loc_test)   
+                    outputs = self.net(*self.x_test)   
                     vloss = self.loss_fn(outputs, self.y_test).item()
                 # Save loss history
                 self.vlosshistory.append(vloss)
