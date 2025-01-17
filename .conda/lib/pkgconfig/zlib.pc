@@ -1,0 +1,13 @@
+prefix=/Users/johanslettengren/Desktop/Dissertation/Structure-Preserving-Operator-Learning/.conda
+exec_prefix=/Users/johanslettengren/Desktop/Dissertation/Structure-Preserving-Operator-Learning/.conda
+libdir=/Users/johanslettengren/Desktop/Dissertation/Structure-Preserving-Operator-Learning/.conda/lib
+sharedlibdir=/Users/johanslettengren/Desktop/Dissertation/Structure-Preserving-Operator-Learning/.conda/lib
+includedir=/Users/johanslettengren/Desktop/Dissertation/Structure-Preserving-Operator-Learning/.conda/include
+
+Name: zlib
+Description: zlib compression library
+Version: 1.2.13
+
+Requires:
+Libs: -L${libdir} -L${sharedlibdir} -lz
+Cflags: -I${includedir}

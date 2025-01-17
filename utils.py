@@ -1,5 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
+from torch.autograd import grad
 
 # Fully connected NN (use same structure for branch and trunk)
 class FNN(torch.nn.Module):
@@ -70,7 +71,7 @@ class Model():
     
     def __init__(
         self, x_train, y_train, x_test, y_test, net, 
-        optimizer='adam', lr=0.001, Px=None, PI_loss_fn=None):     
+        optimizer='adam', lr=0.001, Px=None, PI_loss_fn=None, Tmax=5):     
         
         # Training data
         self.x_train = (self.format(x_train[0]), self.format(x_train[1]))
@@ -99,6 +100,17 @@ class Model():
         self.PI_loss_fn = PI_loss_fn
         
         self.loss_fn = self.MSE_loss if PI_loss_fn is None else self.PINN_loss
+        
+        # Total energy
+        self.energy_history = []
+        
+        # Energy test time-domain
+        self.energy_t = torch.linspace(0, Tmax, 100, requires_grad=True).reshape(-1, 1)
+        
+        # Energy test boundary values
+        self.q = 0
+        self.p = 1
+        self.energy_bv =  torch.tensor([[self.q, self.p]], dtype=torch.float32)
         
         
     # Format data as torch tensor with dtype=float32    
@@ -155,28 +167,56 @@ class Model():
                 
                 # Don't calculate gradients
                 with torch.no_grad():
-                    outputs = self.net(*self.x_test)   
+                    outputs = self.net(*self.x_test)  
                     vloss = self.loss_fn(outputs, self.y_test).item()
+    
                 # Save loss history
                 self.vlosshistory.append(vloss)
                 self.tlosshistory.append(tloss)
                 self.steps.append(iter)
                 self.net.train(True)
                 
-                print('{} \t [{:.2e}] \t [{:.2e}]'.format(iter + 1, tloss, vloss))            
+                print('{} \t [{:.2e}] \t [{:.2e}]'.format(iter + 1, tloss, vloss))    
+                                    
+            if iter == iterations -1:
+                # Calculate total energy
+                u = self.net(self.energy_bv, self.energy_t)   
+                x = u[..., 0]
+                x_t = torch.stack([grad(xi.T, self.energy_t, grad_outputs=torch.ones_like(u[0,:,0]), create_graph=True)[0].squeeze(-1) for xi in x])
+                E = (x_t**2 + x**2)/2
+                
+                # Save total energy
+                self.energy_history.append(E[0,...].detach())
+                
+                
+                        
             
             
     def plot_losshistory(self, dpi=100):
         # Plot the loss trajectory
-        _, ax = plt.subplots(figsize=(8, 6), dpi=dpi)
-        ax.plot(self.steps, self.tlosshistory, label='Training loss')
-        ax.plot(self.steps, self.vlosshistory, label='Test loss')
+        _, ax = plt.subplots(figsize=(8, 2), dpi=dpi)
+        ax.plot(self.steps, self.tlosshistory, '.-', label='Training loss')
+        ax.plot(self.steps, self.vlosshistory, '.-', label='Test loss')
         ax.set_title("Training Loss History")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.set_yscale('log')
         ax.grid(True)
         ax.legend()
+        plt.show()
+        
+    def plot_energy(self, dpi=100):
+        _, ax = plt.subplots(figsize=(8, 2), dpi=dpi)
+        t = self.energy_t.detach()
+        
+        ax.set_title('Total Energy of DeepONet Prediction $(q_0, p_0) = (0, 1)$')
+        ax.plot(t, torch.ones_like(t)*(self.q**2 + self.p**2)/2, alpha=0.5, linewidth=5, label='True energy')
+        ax.plot(t, self.energy_history[-1], '--', alpha=0.8, linewidth=3,  label='DeepONet energy')
+        ax.legend()
+        ax.grid(True)
+        
+        ax.set_xlabel("t")
+        ax.set_ylabel("Total energy")
         plt.show()
     
     # Predict output using DeepONet
