@@ -28,31 +28,82 @@ class FNN(torch.nn.Module):
         x = self.linears[-1](x)
         return x
     
+class branch(torch.nn.Module):
+    def __init__(self, layer_sizes, activation='relu'):
+        super().__init__()
+        
+        # Set activation function
+        self.activation = {'relu' : torch.relu, 'tanh':torch.tanh}[activation]
+
+        # Create layers
+        self.linears = torch.nn.ModuleList()
+        for i in range(1, len(layer_sizes)):
+            layer = torch.nn.Linear(layer_sizes[i - 1], layer_sizes[i])
+            # Initialize weights (normal distribution)
+            torch.nn.init.xavier_normal_(layer.weight)
+            # initialize biases (zeros)
+            torch.nn.init.zeros_(layer.bias)
+            self.linears.append(layer)
+        
+    # FNN forward pass
+    def forward(self, inputs):
+        x = inputs
+        for linear in self.linears[:-1]:
+            x = self.activation(linear(x))
+        x = self.linears[-1](x)
+        return x.view(-1, 2, 2)
+        
+    
 # DeepONet class 
 class DeepONet(torch.nn.Module):
-    def __init__(self, layer_sizes_branch, layer_sizes_trunk, dim_out=1, activation='relu'):
+    def __init__(self, layer_sizes_branch, layer_sizes_trunk, dim_out=1, activation='relu', conserve_energy=False, omega=1):
         super(DeepONet, self).__init__()
         
         # Final output dimension
         self.dim_out = dim_out
                 
         # Initialize branch networks (dim_out many)
-        self.branches = torch.nn.ModuleList([FNN(layer_sizes_branch, activation) for _ in range(self.dim_out)]) 
+        #self.branches = torch.nn.ModuleList([FNN(layer_sizes_branch, activation) for _ in range(self.dim_out)]) 
+        self.branch = branch(layer_sizes_branch, activation) 
         # Initialize one trunk network (using split trunk strategy)
         self.trunk = FNN(layer_sizes_trunk, activation)
         # Initialize bias term
         self.bias = torch.nn.Parameter(torch.zeros(1, 1, self.dim_out))
+        # Whether or not to conserve energy (using orthogonalisation of branch and normalisation of trunk)
+        self.conserve_energy = conserve_energy
+        # Save omega value
+        self.omega = omega
 
     # DeepONet forward pass
     def forward(self, x_func, x_loc):
         
         # Get one output for each branch (dim_out many)
-        branch_outputs = torch.stack([branch(x_func) for branch in self.branches], dim=0)  
-        # Shape (dim_out, #u, i): i = branch & trunk output dim
+        #branch_outputs = torch.stack([branch(x_func) for branch in self.branches], dim=1)  
+        branch_outputs = self.branch(x_func)
+        print(branch_outputs.shape)
+        # Shape (#u, dim_out, K): K = branch & trunk output dim
+        # #u is the same as the number of boundary values
         
         # Get trunk ouput (only one)       
         trunk_output = self.trunk.activation(self.trunk(x_loc))
-        # Shape (#t, i): i = branch & trunk output dim
+        # Shape (#t, K): K = branch & trunk output dim
+              
+        # Orthogonalise the branch and normalise the trunk to conserve energy
+        if self.conserve_energy:
+            
+            P = torch.diag(torch.tensor([self.omega, 1], dtype=torch.float32))
+            P_inv = torch.diag(torch.tensor([1/self.omega, 1], dtype=torch.float32))
+            
+            orthogonol_list = []
+            for n in range(x_func.shape[0]):
+                A =  branch_outputs[n]
+                q, p = x_func[n,...]
+                Q, _ = torch.linalg.qr(P@A)
+                c = torch.sqrt((self.omega**2)*q**2 + p**2)
+                orthogonol_list.append(c*P_inv@Q)
+            
+            branch_outputs = torch.stack(orthogonol_list, dim=0)   
+            trunk_output = torch.nn.functional.normalize(trunk_output, dim=1)
         
         """ If needed in the future
         # trunk_outputs = trunk_outputs.unsqueeze(0).expand(self.dim_out, *trunk_outputs.shape)        
@@ -60,9 +111,11 @@ class DeepONet(torch.nn.Module):
         
         # Equivalent to b @ t.T for each output, but in batch
         # Dot product trunk output with each branch output to get final output
-        output = torch.einsum("dui,ti->utd", branch_outputs, trunk_output) + self.bias 
+        output = torch.einsum("udK,tK->utd", branch_outputs, trunk_output) #+ self.bias 
         # Shape (#u, #t, dim_out)
-
+        
+        q, p = x_func[0,...]
+        
         return output
 
 
@@ -181,10 +234,11 @@ class Model():
             if iter == iterations -1:
                 # Calculate total energy
                 u = self.net(self.energy_bv, self.energy_t)   
-                x = u[..., 0]
-                x_t = torch.stack([grad(xi.T, self.energy_t, grad_outputs=torch.ones_like(u[0,:,0]), create_graph=True)[0].squeeze(-1) for xi in x])
-                E = (x_t**2 + x**2)/2
+                x, y = u[..., 0], u[..., 1]
+                #x_t = torch.stack([grad(xi.T, self.energy_t, grad_outputs=torch.ones_like(u[0,:,0]), create_graph=True)[0].squeeze(-1) for xi in x])
                 
+                E = self.net.omega*x**2 + y**2
+                        
                 # Save total energy
                 self.energy_history.append(E[0,...].detach())
                 
@@ -210,7 +264,7 @@ class Model():
         t = self.energy_t.detach()
         
         ax.set_title('Total Energy of DeepONet Prediction $(q_0, p_0) = (0, 1)$')
-        ax.plot(t, torch.ones_like(t)*(self.q**2 + self.p**2)/2, alpha=0.5, linewidth=5, label='True energy')
+        ax.plot(t, torch.ones_like(t)*(self.net.omega**2*self.q**2 + self.p**2), alpha=0.5, linewidth=5, label='True energy')
         ax.plot(t, self.energy_history[-1], '--', alpha=0.8, linewidth=3,  label='DeepONet energy')
         ax.legend()
         ax.grid(True)
