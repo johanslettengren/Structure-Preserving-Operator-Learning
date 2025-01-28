@@ -96,7 +96,7 @@ class DeepONet(torch.nn.Module):
             # Rescale (so that norm matches energy) and redefine branch outputs
             branch_outputs = Q*torch.linalg.norm(x_func, dim=1, keepdim=True).unsqueeze(-1)
             # Find the corresponding coordinates
-            trunk_outputs = torch.einsum("udK,tK->utK", R, trunk_outputs)
+            trunk_outputs = torch.einsum("ukK,tK->utK", R, trunk_outputs)
             # Normalise and redfine trunk outputs
             trunk_outputs = torch.nn.functional.normalize(trunk_outputs, dim=2)
             # Get corresponding network output (trunk_outputs has one more dimension than usual)
