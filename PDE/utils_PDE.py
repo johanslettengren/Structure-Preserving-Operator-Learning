@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch.autograd import grad
+from torch.autograd.functional import jacobian
 sys.path.append('..')  # Go up one directory to where utils.py is located
 from utils import *
 
@@ -45,7 +46,7 @@ class parameter(torch.nn.Module):
         return z #z.view(n, m, 1)
 
 class branch(torch.nn.Module):
-    def __init__(self, layer_sizes, N, K, activation='softplus', real=True):
+    def __init__(self, layer_sizes, N, K, activation='softplus', real=True, pred_c0=True):
         super().__init__()
         
         # Set activation function
@@ -53,7 +54,12 @@ class branch(torch.nn.Module):
         self.K = K
         self.N = N
         
+        
         self.num_coeffs = N+1 if real else 2*N+1
+        
+        if not pred_c0:
+            self.num_coeffs -= 1
+            
                 
         # Input layer takes 2N+1 Fourier coefficients
         # Ouputs K times 2N+1 'branch vectors'
@@ -100,24 +106,30 @@ class trunk(torch.nn.Module):
     # Trunk forward pass
     def forward(self, x_loc):
         z = x_loc
-        for linear in self.linears:
+        for linear in self.linears[:-1]:
             z = self.activation(linear(z))
+        z = self.linears[-1](z)
         
         return z
 
 
 class SDeepONet(torch.nn.Module):
-    def __init__(self, layer_sizes_branch, layer_sizes_trunk, N, K, weight=None, activation='relu', real=True, conserve=False):
+    def __init__(self, layer_sizes_branch, layer_sizes_trunk, N, K, weight=None, activation='relu', 
+                 real=True, conserve=False, predict_fourier=False, pred_c0=True, L=2):
         super(SDeepONet, self).__init__()
         
         torch.manual_seed(0)
         
+        self.L = L
+        
         self.conserve = conserve
+        
+        self.pred_c0 = pred_c0
         
         # Final output dimension
         self.N = N
         # Initialize branch network 
-        self.branch = branch(layer_sizes_branch, N=N, K=K, activation=activation, real=real) 
+        self.branch = branch(layer_sizes_branch, N=N, K=K, activation=activation, real=real, pred_c0=pred_c0) 
         # self.branches = torch.nn.ModuleList([FNN(layer_sizes_branch, N=N, K=K) for _ in range(K)])
         # Initialize trunk network
         self.trunk = trunk(layer_sizes_trunk, K=K, activation=activation)
@@ -125,11 +137,17 @@ class SDeepONet(torch.nn.Module):
         # Integral weight network
         self.weight = parameter([2, 40, 40, 40, 1], activation=activation)
         
-        self.I = lambda a : 18 * a**3 * (np.tanh(a/2) - np.tanh(a/2)**3 / 3 - np.tanh(-a/2) + np.tanh(-a/2)**3 / 3 )
+        #self.I = lambda a : 18 * a**3 * (np.tanh(a/2) - np.tanh(a/2)**3 / 3 - np.tanh(-a/2) + np.tanh(-a/2)**3 / 3 )
         
-        self.d = torch.concatenate((torch.tensor([1]), np.sqrt(2)*torch.ones(N)))[None, :, None]
+        
+        #k = torch.arange(self.N + 1)
+        w = torch.concatenate((torch.tensor([1]), 2*torch.ones(N)))
+        #d = k ** 0
+        self.d = torch.sqrt(w)[None, :, None]
         
         self.p = torch.nn.Parameter(torch.tensor([1.0]))
+        
+        self.predict_fourier = predict_fourier
 
 
 
@@ -150,6 +168,7 @@ class SDeepONet(torch.nn.Module):
         
         if self.conserve != False:
         
+        
             # turn 2-d vectors into complex numbers
             # has shape (num_iv, num_coeffs, K)
             branch_outputs = torch.view_as_complex(branch_outputs)
@@ -161,13 +180,12 @@ class SDeepONet(torch.nn.Module):
             
             # Rescale (so that norm matches energy) and redefine branch outputs
             a = x_func[...,0]
-            branch_outputs = (Q / self.d) * (2*self.N+1) / np.sqrt(2)
-            branch_outputs = branch_outputs * torch.sqrt(self.I(a)[:, None, None])
+            branch_outputs = (Q / self.d) * (2*self.N+1) / np.sqrt(self.L)
+            branch_outputs = branch_outputs * torch.sqrt((self.I2(a))[:, None, None])
+            
+            
             trunk_outputs = torch.einsum("ukK,tK->utK", R, trunk_outputs)
             trunk_outputs = torch.nn.functional.normalize(trunk_outputs, dim=-1)
-
-
-            
             
             if self.conserve == 'trained':
                 #branch_outputs = branch_outputs * 1.2 #(1+self.weight(x_func)[:, None])
@@ -176,63 +194,144 @@ class SDeepONet(torch.nn.Module):
             
             # Get corresponding network output (trunk_outputs has one more dimension than usual)
             output = torch.einsum("udK,utK->utd", branch_outputs, trunk_outputs)
-            # output = torch.view_as_real(output)
+        
+            #output = torch.concatenate()
+            if self.predict_fourier:
+                output = torch.view_as_real(output)
+                return output
             
         else:
             # Get network output when energy is not conserved
             output = torch.einsum("udKc,tK->utdc", branch_outputs, trunk_outputs)
+            if self.predict_fourier:
+                return output
             output = torch.view_as_complex(output.contiguous())
-    
+            if not self.pred_c0:
+                c0 = self.c0(x_func[:,0]).repeat(50,1)[...,None]
+                output = torch.concatenate((c0, output), axis=-1)
+
+        
+        #print(torch.linalg.norm(output, axis=-1))
         output = torch.fft.irfft(output, n=2*self.N+1)
         
-        
         return output
+    
+    def I2(self, a):
+        if isinstance(a, torch.Tensor):
+            tanh = torch.tanh
+        else:
+            tanh = np.tanh
+
+        return 18 * a**3 * (tanh(self.L*a/4) - tanh(self.L*a/4)**3 / 3 - (-tanh(self.L*a/4)) + (-tanh(self.L*a/4))**3 / 3)
+    
+    
+    def gradI(self, a):
+        if isinstance(a, torch.Tensor):
+            cosh, tanh = torch.cosh, torch.tanh
+        else:
+            cosh, tanh = np.cosh, np.tanh
+
+        p_ = lambda x : (cosh(2*x) + 4) * tanh(x) ** 3 / cosh(x)**2
+        
+        return 18 * a**5 * (p_(a/2) - p_(-a/2)) / 15
+    
+    def c0(self, a):
+        if isinstance(a, torch.Tensor):
+            tanh = torch.tanh
+        else:
+            tanh = np.tanh
+        
+        return 3 * a * (tanh(a/2) - tanh(-a/2)) * (2*self.N+1)
     
     
 class Model():
 
-    def __init__(self, N, K, num_iv, num_t, layer_sizes_branch, layer_sizes_trunk, conserve=False, lr=0.001):    
+    def __init__(self, N, K, num_iv, num_t, layer_sizes_branch, layer_sizes_trunk, conserve=False, lr=0.001, 
+                 predict_fourier=False, pred_c0=True, L=2):    
         
         torch.manual_seed(14)
         np.random.seed(14)
         
+        self.num_iv = num_iv
+        self.num_t = num_t
+        
+        self.L = L
+
+        
         self.N = N
         self.conserve = conserve
+        self.predict_fourier = predict_fourier
         
         d = torch.concatenate((torch.tensor([1]), np.sqrt(2)*torch.ones(self.N)))
         self.integrate = lambda coeffs : 2*(torch.linalg.norm(d * coeffs, axis=2)**2).unsqueeze(-1)
-        self.I = lambda a : 18 * a**3 * (np.tanh(a/2) - np.tanh(a/2)**3 / 3 - np.tanh(-a/2) + np.tanh(-a/2)**3 / 3 )
-
         
-        self.f = lambda x, a, t, x0: 3 * a**2 / np.cosh((a * (((x + x0) + 1 - a**2 * t) % 2 - 1)) / 2)**2
+        self.net = SDeepONet(layer_sizes_branch, layer_sizes_trunk, N=N, K=K, conserve=conserve, 
+                             predict_fourier=predict_fourier, pred_c0=pred_c0, L=self.L)
+
+        self.I2 = self.net.I2
+        
+        self.f = lambda x, a, t, x0: 3 * a**2 / np.cosh((a * (((x + x0) + self.L/2 - a**2 * t) % self.L - self.L/2)) / 2)**2
         
         # Training data
         targets, a, x0, t = self.get_data(num_iv, num_t)
         x_train = self.format(np.concatenate((a, x0), axis=1))
-                        
         self.x_train = (x_train, self.format(t))
         self.y_train = targets
         
+        # Collocation points
+        targets, a, x0, t = self.get_data(5, 5)
+        x_col = self.format(np.concatenate((a, x0), axis=1))     
+        self.x_col = (x_col, self.format(t, requires_grad=True))
+        
         # Testing data
         targets, a, x0, t = self.get_data(num_iv, num_t)
-        x_test = self.format(np.concatenate((a, x0), axis=1))
+        x_test = self.format(np.concatenate((a, x0), axis=1), requires_grad=True)
                         
         self.x_test = (x_test, self.format(t))
         self.y_test = self.format(targets)
         
         self.mse = torch.nn.MSELoss() 
-        self.loss_fn = self.mse        
+        self.loss_fn = self.mse      
             
-        self.net = SDeepONet(layer_sizes_branch, layer_sizes_trunk, N=N, K=K, conserve=conserve)
-
         # Initialize optimizer (default adam)
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-            self.optimizer,
-            lr_lambda=lambda epoch: 0.5 ** (epoch // 1000)
+           self.optimizer,
+          lr_lambda=lambda epoch: 0.5 ** (epoch // 10000)
         )
+
+    def c(self, t):
+        return self.net(self.x_train[0], t)
   
+    def pinn_loss(self):
+        
+        c = self.net(*self.x_col)
+        c = torch.view_as_complex(c.contiguous())
+        t = self.x_col[1]
+        c_t = torch.zeros_like(c)
+        
+        for i in range(c.shape[0]):
+            for j in range(c.shape[2]):
+                    cc = c[i,:,j]
+                    c_t[i,:,j] = grad(cc, t, grad_outputs=torch.ones_like(cc), create_graph=True)[0][0,:]
+        
+    
+        
+        k = torch.arange(self.N+1)[None, None, :]
+        c_x = 1j * k * c
+        c_xxx = (-1j) * k**3 * c
+        
+        
+        pde = torch.view_as_real(c_t + c*c_x + c_xxx)
+        
+        
+        
+        loss = self.mse(pde, torch.zeros_like(pde))
+        
+        return loss
+        
          
+    
     # Format data as torch tensor with dtype=float32    
     def format(self, x, requires_grad=False):
         x = x if isinstance(x, torch.Tensor) else torch.tensor(x)
@@ -240,21 +339,24 @@ class Model():
 
     def get_data(self, num_iv, num_t):
         
-        x = np.linspace(-1, 1, 2*self.N+1)[None, None, :]
+        x = np.linspace(-self.L/2, self.L/2, 2*self.N+1)[None, None, :]
         t = np.linspace(0, 1, num_t)[None, :, None]
-        a = np.random.uniform(0, 1, size=(num_iv, 1, 1))
-        x0 = np.random.uniform(-1, 1, size=(num_iv, 1, 1))
+        a = np.random.uniform(0.4, 0.8, size=(num_iv, 1, 1))
+        x0 = np.random.uniform(-2, 2, size=(num_iv, 1, 1))
     
         y = self.f(x, a, t, x0)
         
-        # coeffs = np.fft.rfft(y, axis=-1)        
-        # if self.conserve:
-        #     analytic_integral = self.I(a)
-        #     truncated_integral = np.asarray(self.integrate(coeffs / (2*self.N+1)))
-        #     coeffs = coeffs*np.sqrt(analytic_integral / truncated_integral)            
-        # coeffs = torch.view_as_real(torch.tensor(coeffs, dtype=torch.cfloat)).to(torch.float32)
+        if self.predict_fourier:
+            coeffs = np.fft.rfft(y, axis=-1)        
+            if self.conserve:
+                analytic_integral = self.I2(a)
+                truncated_integral = np.asarray(self.integrate(coeffs / (2*self.N+1)))
+                coeffs = coeffs*np.sqrt(analytic_integral / truncated_integral)            
+            y = torch.view_as_real(torch.tensor(coeffs, dtype=torch.cfloat)).to(torch.float32)
+        else:
+            y = torch.tensor(y, dtype=torch.float32)
         
-        return torch.tensor(y, dtype=torch.float32), a[...,0], x0[...,0], t[0,...]
+        return y, a[...,0], x0[...,0], t[0,...]
     
     def inital_values(self, a, x0):
 
@@ -281,14 +383,17 @@ class Model():
 
         for iter in range(iterations):
             
+            
             # Train
             self.optimizer.zero_grad()
             prediction = self.net(*self.x_train)
             
-            loss = self.loss_fn(prediction, self.y_train)
+            #print(self.x_train[1])
+            
+            loss = self.loss_fn(prediction, self.y_train) #+ self.pinn_loss()
             loss.backward()
             self.optimizer.step()
-            #self.scheduler.step()
+            self.scheduler.step()
 
             # Test
             if iter % 1000 == 999:
@@ -326,7 +431,7 @@ class Model():
     def plot_conservation(self, a, x0, dpi=100):
                     
         # Energy test boundary values
-        analytical_integral =  self.I(a) 
+        analytical_integral =  self.I2(a) 
         
         t = torch.linspace(0, 1, 100, requires_grad=True)[:,None]        
         iv =  torch.tensor([[a, x0]], dtype=torch.float32)
@@ -360,11 +465,11 @@ class Model():
         
         a, x0, t = a[:,None], x0[:,None], t[:,None]
                 
-        output_coeffs = self.net(self.format(np.concatenate((a, x0), axis=1)), self.format(t))
+        output = self.net(self.format(np.concatenate((a, x0), axis=1)), self.format(t))
         # coeffs = torch.view_as_complex(output_coeffs)
         
         #output_func = np.fft.ifft(output_coeffs.detach(), n=2*N+1)
         
-        return coeffs
+        return output
             
     
