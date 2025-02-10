@@ -12,7 +12,7 @@ from utils import *
 
 
 
-
+# Traininable parameter (a function of on any of a, x0 and t)
 class parameter(torch.nn.Module):
     def __init__(self, layer_sizes, activation='tanh'):
         super().__init__()
@@ -45,6 +45,7 @@ class parameter(torch.nn.Module):
         z = self.linears[-1](z)
         return z #z.view(n, m, 1)
 
+# Branch net
 class branch(torch.nn.Module):
     def __init__(self, layer_sizes, N, K, activation='softplus', real=True, pred_c0=True):
         super().__init__()
@@ -84,6 +85,7 @@ class branch(torch.nn.Module):
         
         return z
         
+# Trunk net 
 class trunk(torch.nn.Module):
     def __init__(self, layer_sizes, K, activation='softplus'):
         super().__init__()
@@ -112,7 +114,7 @@ class trunk(torch.nn.Module):
         
         return z
 
-
+# Spectral DeepONet (levrages Fourier series representation of solution)
 class SDeepONet(torch.nn.Module):
     def __init__(self, layer_sizes_branch, layer_sizes_trunk, N, K, weight=None, activation='relu', 
                  real=True, conserve=False, predict_fourier=False, pred_c0=True, L=2):
@@ -120,10 +122,11 @@ class SDeepONet(torch.nn.Module):
         
         torch.manual_seed(0)
         
+        # Width of interval [-L/2, L/2]
         self.L = L
-        
+        # Whether to enforce conservation law
         self.conserve = conserve
-        
+        # Whether to predict zeroth coefficient (failed test)
         self.pred_c0 = pred_c0
         
         # Final output dimension
@@ -141,12 +144,15 @@ class SDeepONet(torch.nn.Module):
         
         
         #k = torch.arange(self.N + 1)
+        
+        # Weights for "P-matrix" in bilinear form
         w = torch.concatenate((torch.tensor([1]), 2*torch.ones(N)))
-        #d = k ** 0
         self.d = torch.sqrt(w)[None, :, None]
         
+        # Additional parameter (may or may nor be used)
         self.p = torch.nn.Parameter(torch.tensor([1.0]))
         
+        # Whether to predict Fourier ceofficients or function values
         self.predict_fourier = predict_fourier
 
 
@@ -165,9 +171,9 @@ class SDeepONet(torch.nn.Module):
         trunk_outputs  = self.trunk(x_loc)
         # Shape (#t, K): K = branch & trunk output dim
             
-        
+        # If conservation law is enforced
         if self.conserve != False:
-        
+            
         
             # turn 2-d vectors into complex numbers
             # has shape (num_iv, num_coeffs, K)
@@ -178,30 +184,32 @@ class SDeepONet(torch.nn.Module):
             Q, R = torch.linalg.qr(branch_outputs * self.d)
             
             
-            # Rescale (so that norm matches energy) and redefine branch outputs
             a = x_func[...,0]
+            # Orthonormalise wrt to bilinear form
             branch_outputs = (Q / self.d) * (2*self.N+1) / np.sqrt(self.L)
+            # Rescale (so that norm matches energy) and redefine branch outputs
             branch_outputs = branch_outputs * torch.sqrt((self.I2(a))[:, None, None])
             
-            
+            # Transform trunk coordinates to match new branch
             trunk_outputs = torch.einsum("ukK,tK->utK", R, trunk_outputs)
+            # Normalise new trunk
             trunk_outputs = torch.nn.functional.normalize(trunk_outputs, dim=-1)
             
+            # Whether to train branch norm or not (not currently in use)
             if self.conserve == 'trained':
                 #branch_outputs = branch_outputs * 1.2 #(1+self.weight(x_func)[:, None])
                 pass
 
-            
-            # Get corresponding network output (trunk_outputs has one more dimension than usual)
+            # Get network output
             output = torch.einsum("udK,utK->utd", branch_outputs, trunk_outputs)
         
-            #output = torch.concatenate()
+            # Convert complex output to real output
             if self.predict_fourier:
                 output = torch.view_as_real(output)
                 return output
             
         else:
-            # Get network output when energy is not conserved
+            # Get network output when conservation law is not enforced
             output = torch.einsum("udKc,tK->utdc", branch_outputs, trunk_outputs)
             if self.predict_fourier:
                 return output
@@ -216,7 +224,9 @@ class SDeepONet(torch.nn.Module):
         
         return output
     
+    # Calculates analytical integral of u^2 (based on initial condition)
     def I2(self, a):
+        
         if isinstance(a, torch.Tensor):
             tanh = torch.tanh
         else:
@@ -224,7 +234,7 @@ class SDeepONet(torch.nn.Module):
 
         return 18 * a**3 * (tanh(self.L*a/4) - tanh(self.L*a/4)**3 / 3 - (-tanh(self.L*a/4)) + (-tanh(self.L*a/4))**3 / 3)
     
-    
+    # Calculates analytical integral of u_x (not currently in use)
     def gradI(self, a):
         if isinstance(a, torch.Tensor):
             cosh, tanh = torch.cosh, torch.tanh
@@ -235,6 +245,7 @@ class SDeepONet(torch.nn.Module):
         
         return 18 * a**5 * (p_(a/2) - p_(-a/2)) / 15
     
+    # Calculates analytical value of zeroth coefficient (not currently in use)
     def c0(self, a):
         if isinstance(a, torch.Tensor):
             tanh = torch.tanh
@@ -252,24 +263,33 @@ class Model():
         torch.manual_seed(14)
         np.random.seed(14)
         
+        # Number of test- and training-points
         self.num_iv = num_iv
         self.num_t = num_t
         
+        # Length of interval [-L/2, L/2]
         self.L = L
 
-        
+        # 2N + 1 is the number of coefficients in use
         self.N = N
+        # Whether to enforce conservation law
         self.conserve = conserve
+        # Whether to predict coefficients or function values
         self.predict_fourier = predict_fourier
         
+        # Weights for "integration" via coefficients
         d = torch.concatenate((torch.tensor([1]), np.sqrt(2)*torch.ones(self.N)))
+        # "Integration" via coefficients 
         self.integrate = lambda coeffs : 2*(torch.linalg.norm(d * coeffs, axis=2)**2).unsqueeze(-1)
         
+        # Spectral DeepONet to be trained
         self.net = SDeepONet(layer_sizes_branch, layer_sizes_trunk, N=N, K=K, conserve=conserve, 
                              predict_fourier=predict_fourier, pred_c0=pred_c0, L=self.L)
 
+        # Calculates analytical integral of u^2
         self.I2 = self.net.I2
         
+        # Calculates initial condition based on x, a, t and x0
         self.f = lambda x, a, t, x0: 3 * a**2 / np.cosh((a * (((x + x0) + self.L/2 - a**2 * t) % self.L - self.L/2)) / 2)**2
         
         # Training data
@@ -278,7 +298,7 @@ class Model():
         self.x_train = (x_train, self.format(t))
         self.y_train = targets
         
-        # Collocation points
+        # Collocation points (for PINN)
         targets, a, x0, t = self.get_data(5, 5)
         x_col = self.format(np.concatenate((a, x0), axis=1))     
         self.x_col = (x_col, self.format(t, requires_grad=True))
@@ -300,10 +320,13 @@ class Model():
           lr_lambda=lambda epoch: 0.5 ** (epoch // 10000)
         )
 
-    def c(self, t):
-        return self.net(self.x_train[0], t)
+
+    # def c(self, t):
+    #     return self.net(self.x_train[0], t)
   
-    def pinn_loss(self):
+    # Physics informed loss (using fourier coefficients for computing u_x)
+    # Not currently used 
+    """def pinn_loss(self):
         
         c = self.net(*self.x_col)
         c = torch.view_as_complex(c.contiguous())
@@ -328,7 +351,7 @@ class Model():
         
         loss = self.mse(pde, torch.zeros_like(pde))
         
-        return loss
+        return loss"""
         
          
     
@@ -337,6 +360,7 @@ class Model():
         x = x if isinstance(x, torch.Tensor) else torch.tensor(x)
         return x.to(torch.float32).requires_grad_(requires_grad)
 
+    # Generates data for training and testing
     def get_data(self, num_iv, num_t):
         
         x = np.linspace(-self.L/2, self.L/2, 2*self.N+1)[None, None, :]
@@ -346,24 +370,27 @@ class Model():
     
         y = self.f(x, a, t, x0)
         
+        # Convert to coefficients if Fourier coeffs are predictes
         if self.predict_fourier:
             coeffs = np.fft.rfft(y, axis=-1)        
-            if self.conserve:
-                analytic_integral = self.I2(a)
-                truncated_integral = np.asarray(self.integrate(coeffs / (2*self.N+1)))
-                coeffs = coeffs*np.sqrt(analytic_integral / truncated_integral)            
+            # if self.conserve:
+            #     analytic_integral = self.I2(a)
+            #     truncated_integral = np.asarray(self.integrate(coeffs / (2*self.N+1)))
+            #     coeffs = coeffs*np.sqrt(analytic_integral / truncated_integral)            
             y = torch.view_as_real(torch.tensor(coeffs, dtype=torch.cfloat)).to(torch.float32)
         else:
             y = torch.tensor(y, dtype=torch.float32)
         
         return y, a[...,0], x0[...,0], t[0,...]
     
-    def inital_values(self, a, x0):
+    # Get initial values corresponding to x, a and x0
+    # Not currently used as we predict based directly on a and x0
+    """def inital_values(self, a, x0):
 
         f = lambda x, a, x0: 3 * a**2 / np.cosh((a * (((x + x0) + 1) % 2 - 1))/2)**2
         x = np.linspace(-1, 1, 2*self.N+1)[None, :]
 
-        return self.format(np.fft.rfft(f(x, a, x0)))
+        return self.format(np.fft.rfft(f(x, a, x0)))"""
 
     
     # Train network
@@ -428,22 +455,20 @@ class Model():
         ax.legend()
         plt.show()
         
-    def plot_conservation(self, a, x0, dpi=100):
+    # Implemented in notebook for more flexibility
+    """def plot_conservation(self, a, x0, dpi=100):
                     
-        # Energy test boundary values
+        # Analytical integral of u^w
         analytical_integral =  self.I2(a) 
         
         t = torch.linspace(0, 1, 100, requires_grad=True)[:,None]        
         iv =  torch.tensor([[a, x0]], dtype=torch.float32)
         
-        # Calculate total energy
+        #
         u = self.net(iv, t)   
         u = torch.view_as_complex(u.contiguous()) / (2*self.N+1)
         u = u[0,...]
-        u = torch.concatenate((u, u[...,1:]), dim=1)
-        
-        #print(u)
-  
+        u = torch.concatenate((u, u[...,1:]), dim=1)  
         integral = 2*torch.sum(torch.abs(u)**2, axis=1).detach()
         #integral = 2*torch.linalg.norm(u, axis=-1).detach()
         t= t.detach()
@@ -458,8 +483,8 @@ class Model():
         
         ax.set_xlabel("t")
         ax.set_ylabel("$\int_{\mathbb{T}} u^2(x, t)dx$")
-        plt.show()
-    
+        plt.show()"""    
+        
     # Predict output using DeepONet
     def predict(self, a, x0, t):
         
