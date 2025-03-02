@@ -24,6 +24,8 @@ class FNN(torch.nn.Module):
             torch.nn.init.zeros_(layer.bias)
             self.linears.append(layer)
         
+        # self.bias = torch.nn.Parameter(torch.zeros(1, 1, self.dim))
+        
     # Branch forward pass
     def forward(self, x_func):
 
@@ -74,7 +76,7 @@ class trunk(torch.nn.Module):
         # Set activation function
         self.activation = {'relu' : torch.relu, 'tanh':torch.tanh, 'softplus':torch.nn.Softplus()}[activation]
         
-        layer_sizes = [1] + layer_sizes + [2]
+        layer_sizes = [1] + layer_sizes
         
         # Create layers
         self.linears = torch.nn.ModuleList()
@@ -83,7 +85,7 @@ class trunk(torch.nn.Module):
             # Initialize weights (normal distribution)
             torch.nn.init.xavier_normal_(layer.weight)
             # Initialize biases (zeros)
-            #torch.nn.init.zeros_(layer.bias)
+            torch.nn.init.zeros_(layer.bias)
             self.linears.append(layer)
         
     # Trunk forward pass
@@ -104,7 +106,8 @@ class trunk(torch.nn.Module):
     
 # DeepONet class 
 class DeepONet(torch.nn.Module):
-    def __init__(self, layer_sizes_branch, layer_sizes_trunk, K=2, dim=2, activation='softplus', conserve_energy=False, symplectic=False):
+    def __init__(self, layer_sizes_branch, layer_sizes_trunk, K=2, dim=2, activation='softplus', 
+                 conserve_energy=False, symplectic=False, reg=False):
         super(DeepONet, self).__init__()
         
         
@@ -114,18 +117,23 @@ class DeepONet(torch.nn.Module):
         self.dim = dim
         # Initialize branch networks (dim many)
         # self.branches = torch.nn.ModuleList([FNN(layer_sizes_branch, activation) for _ in range(K)]) 
-        self.branches = torch.nn.ModuleList([FNN([1] + layer_sizes_branch + [1], activation) for _ in range(2)]) 
+        self.branches = torch.nn.ModuleList([FNN([1] + layer_sizes_branch + [K], activation) for _ in range(3)]) 
         #self.branches = torch.nn.ModuleList([FNN([1] + layer_sizes_branch + [2], activation) for _ in range(2)]) 
         
-        self.branch = branch(layer_sizes_branch, dim=dim, K=K, activation=activation) 
+        self.branch = FNN([2] + layer_sizes_branch + [2], activation) if symplectic else branch(layer_sizes_branch, dim=dim, K=K, activation=activation) 
+
         #self.branch = branch(layer_sizes_branch, dim=dim, K=K, activation=activation) 
         # Initialize one trunk network (using split trunk strategy)
-        self.trunk = trunk(layer_sizes_trunk, K=K)
-        # Initialize bias term
-        # Not used!
-        # self.bias = torch.nn.Parameter(torch.zeros(1, 1, self.dim))
+        trunk_size = 1 if symplectic in [2,3] else K
+        self.trunk = trunk(layer_sizes_trunk + [trunk_size], K=K)
+        
+        self.trunks = torch.nn.ModuleList([trunk([1] + layer_sizes_branch + [K], activation) for _ in range(3)]) 
+        
+        
         # Whether or not to conserve energy (using orthogonalisation of branch and normalisation of trunk)
         self.conserve_energy = conserve_energy
+        
+        self.reg = reg
 
     # DeepONet forward pass
     def forward(self, x_func, x_loc):
@@ -134,25 +142,185 @@ class DeepONet(torch.nn.Module):
         # Get one output for each branch (dim many)
         # Shape (#u, dim, K): K = branch & trunk output dim
         # #u is the same as the number of boundary values
-        #branch_outputs = torch.stack([self.branches[i](x_func[:,-i,None]) for i in range(len(self.branches))], axis=-1)
+        # branch_outputs = torch.stack([self.branches[i](x_func[:,-i,None]) for i in range(len(self.branches))], axis=-1)
         
         # Get trunk ouput (only one)  
         trunk_outputs  = self.trunk(x_loc)
         
+        
+        
+        #trunk_outputs = torch.concatenate((torch.cos(x_loc), torch.sin(x_loc)), axis=-1)
+        
+        
         #print(trunk_outputs.shape)
         
-        if self.symplectic: 
+        if self.symplectic is True: 
             
-            bs = [self.branches[i](x_func[:,i,None]) for i in range(len(self.branches))]            
-            b1 = torch.stack(bs, axis=1)[...,0]
-            mask = torch.tensor([-1, 1])[None, :] 
-            b2 = mask * b1.flip(dims=[-1])
-            branch_outputs = torch.stack((b1, b2), axis=-1)      
+            
+            
+            #bs = [self.branches[i](x_func[:,i,None]) for i in range(len(self.branches))]     
+            #b1 = torch.stack(bs, axis=1)[...,0]
+
+            b1 = self.branch(x_func)
+            J = torch.tensor([[0, 1], [-1, 0]], dtype=torch.float32)
+            b2 = torch.einsum ('id, dk -> ik', b1, J)
+            branch_outputs = torch.stack((b1, b2), axis=-1)     
             trunk_outputs = torch.nn.functional.normalize(trunk_outputs, dim=-1)
+            
+            
+            
+        
+            
+        
+            
+
+            
+            # trunk_outputs = torch.stack((t1, t2), axis=-1).squeeze(1)
+            
+            
+            #print(branch_outputs.shape)
+            
+            #print(einsum_prod - b2)
+            #b3 = 
+            #print(b1.shape)
+        
             
             #branch_outputs = torch.stack([self.branches[i](x_func[:,i,None]) for i in range(len(self.branches))], axis=-1)
                   
-    
+        elif self.symplectic == 2:
+            
+            
+            conj_momenta = x_func[:, None, :]
+            
+            output = torch.tensor([])
+            
+            h = (x_loc[1] - x_loc[0])[:,None, None]
+            
+            for i, _ in enumerate(x_loc):
+                
+                                
+                
+                b = self.branches[i % 2](conj_momenta[...,(i + 1)  % 2])   
+                l = [b, torch.zeros_like(b)] if (i % 2) == 0 else [torch.zeros_like(b), b]
+                b = torch.stack(l, axis=-1)
+                                
+                t = self.trunk(h)
+                conj_momenta = conj_momenta + t * b
+            
+                output = torch.concatenate((output, conj_momenta), axis=1)
+                
+
+            return output
+        
+        
+        
+        elif self.symplectic == 3:
+            
+            l =  [0, 1, 2, 3]
+            
+            conj_momenta = x_func[:,None,:]
+            
+            
+            
+            for i in range(3):
+                
+                if i == 0:
+
+                    b = self.branches[i]((conj_momenta[...,0] + conj_momenta[..., 1])[...,None])
+                    b = torch.concatenate([b, -b], axis=-1)   
+                                
+                    t = self.trunks[i](x_loc)[None,...]
+                    
+                    conj_momenta = conj_momenta + t * b
+                    
+                    
+                elif i == 1:
+                    
+                    b = self.branches[i]((conj_momenta[..., 0] - conj_momenta[..., 1])[...,None])
+                    b = torch.concatenate([b, b], axis=-1)   
+                                
+                    
+                    t = self.trunks[i](x_loc)[None,...]
+                    conj_momenta = conj_momenta + t * b
+                    
+                elif i % 2 == 1:
+                    
+                    b = self.branches[0]((conj_momenta[..., 0] + conj_momenta[..., 1])[...,None])
+                    b = torch.concatenate([b, -b], axis=-1)   
+                                
+                    
+                    t = self.trunks[0](x_loc)[None,...]
+                    conj_momenta = conj_momenta + t * b
+                    
+                # elif i % 4 == 2:
+                    
+                #     b = self.branches[i % 4]((conj_momenta[...,1])[...,None])
+                #     b = torch.concatenate([b, 0*b], axis=-1)   
+                                
+                    
+                #     t = self.trunks[i % 4](x_loc)[None,...]
+                #     conj_momenta = conj_momenta + t * b
+                    
+                # else:
+                    
+                #     b = self.branches[i % 4]((conj_momenta[...,0])[...,None])
+                #     b = torch.concatenate([0*b, b], axis=-1)   
+                                
+                    
+                #     t = self.trunks[i % 4](x_loc)[None,...]
+                #     conj_momenta = conj_momenta + t * b
+                
+                
+                # b = self.branches[1]((conj_momenta[...,0] - conj_momenta[..., 1])[...,None])
+                # b = torch.concatenate([b, b], axis=-1)   
+                            
+                
+                # t = self.trunks[1](x_loc)[None,...]
+                # conj_momenta = conj_momenta + t * b
+            
+            
+            
+                        
+        
+            
+                            
+            # b = self.branches[1](torch.sum(conj_momenta, axis=-1, keepdim=True))
+            # b = torch.concatenate([b, b], axis=-1)
+        
+            # t = self.trunks[1](x_loc) 
+            # conj_momenta = conj_momenta + t[None,...] * b
+            
+            
+                            
+            # b = self.branches[2](conj_momenta[..., None, 1])
+            # b = torch.concatenate([b, torch.zeros_like(b)], axis=-1)
+            
+        
+            # t = self.trunks[2](x_loc) 
+            # conj_momenta = conj_momenta + t[None,...] * b
+        
+            
+            # b = self.branches[3](conj_momenta[..., None, 0])
+            # b = torch.concatenate([torch.zeros_like(b), b], axis=-1)
+        
+        
+            # t = self.trunks[3](x_loc) 
+            # conj_momenta = conj_momenta + t[None,...] * b
+            
+            
+            # for i in range(10):
+                
+            #     s = 1 if not (i % 2) else -1
+            #     x_func = conj_momenta[..., None, 0] + s*conj_momenta[..., None, 1]
+                
+            #     b = self.branches[i % 2](x_func).squeeze(2)
+            #     b = torch.stack([b, -s*b], axis=-1)
+            
+            #     t = self.trunks[i % 2](x_loc) 
+            #     conj_momenta = conj_momenta + t[None,:,:] * b
+            
+                    
+            return conj_momenta
         
         else:
             branch_outputs = self.branch(x_func)            
@@ -171,6 +339,8 @@ class DeepONet(torch.nn.Module):
         else:
             # Get network output when energy is not conserved
             output = torch.einsum("udK,tK->utd", branch_outputs, trunk_outputs)
+            
+            
         
               
         
@@ -190,15 +360,17 @@ class Model():
         optimizer='adam', lr=0.001, Px=None, PI_loss_fn=None, Tmax=5):     
         
         # Training data
-        self.x_train = (self.format(x_train[0]), self.format(x_train[1]))
+        self.x_train = (self.format(x_train[0], requires_grad=True), self.format(x_train[1], requires_grad=True))
         self.y_train = self.format(y_train)
         
         # Testing data
-        self.x_test = (self.format(x_test[0]), self.format(x_test[1]))
+        self.x_test = (self.format(x_test[0], requires_grad=True), self.format(x_test[1], requires_grad=True))
         self.y_test = self.format(y_test)
         
 
-        self.x_col = (self.format(x_col[0]), self.format(x_col[1]))
+        self.x_col = (self.format(x_col[0], requires_grad=True), self.format(x_col[1], requires_grad=True))
+        
+        self.bestloss = 1000000
         
 
         
@@ -258,6 +430,7 @@ class Model():
 
         for iter in range(iterations):
             
+            
                         
             # Physics informed loss
             #u = self.net(self.Px_func, self.Px_loc)
@@ -267,14 +440,19 @@ class Model():
             
             # Train
             self.optimizer.zero_grad()
-            prediction = self.net(*self.x_train)
-            loss = self.loss_fn(prediction, self.y_train)
+            outputs = self.net(*self.x_train)   
+            # outputs_0 =  self.net(self.x_train[0], torch.zeros_like(self.x_train[1])) 
+            # outputs = outputs + self.x_train[0][:, None, :] - outputs_0
+            
+            loss = self.loss_fn(outputs, self.y_train)
 
-            if self.net.symplectic:
-                prediction_0 = self.net(*self.x_col)
-                loss_0 = self.loss_fn(prediction_0, self.x_col[0][:, None, :])
+            if self.net.reg:
+                outputs_0 = self.net(*self.x_col)
+                loss_0 = self.loss_fn(outputs_0, self.x_col[0][:, None, :])
                 loss += loss_0
             
+            #loss.requires_grad = True
+
             loss.backward()
             self.optimizer.step()
             tloss = loss.item()
@@ -290,12 +468,21 @@ class Model():
                     
                     
                     outputs = self.net(*self.x_test)  
+                    # outputs_0 =  self.net(self.x_test[0], torch.zeros_like(self.x_test[1]))
+                    # outputs = outputs * self.x_test[0][:, None, :] / outputs_0
                     vloss = self.loss_fn(outputs, self.y_test).item()
                     
-                    if self.net.symplectic:
-                        prediction_0 = self.net(*self.x_col)
-                        vloss_0 = self.loss_fn(prediction_0, self.x_col[0][:, None, :])
-                        vloss += vloss_0
+                    best = ''
+                    if vloss < self.bestloss:
+                        best = 'New best model!'
+                        self.bestloss = vloss
+                        torch.save(self.net.state_dict(), "best_model.pth")  # Save model weights
+
+                
+                if self.net.reg:
+                    outputs_0 = self.net(*self.x_col)
+                    vloss_0 = self.loss_fn(outputs_0, self.x_col[0][:, None, :])
+                    vloss += vloss_0
                     
                     
     
@@ -305,7 +492,11 @@ class Model():
                 self.steps.append(iter)
                 self.net.train(True)
                 
-                print('{} \t [{:.2e}] \t [{:.2e}]'.format(iter + 1, tloss, vloss))    
+                print('{} \t [{:.2e}] \t [{:.2e}] \t {}'.format(iter + 1, tloss, vloss, best))    
+                
+        self.net.load_state_dict(torch.load("best_model.pth", weights_only=True))
+        self.net.eval()
+
                 
                 
                         
@@ -393,6 +584,13 @@ class Model():
     # Predict output using DeepONet
     def predict(self, x_func, x_loc):
         
-        return self.net(self.format(x_func, requires_grad=True), self.format(x_loc, requires_grad=True))
+        x_func = self.format(x_func, requires_grad=True)
+        x_loc = self.format(x_loc, requires_grad=True)
+        
+        u = self.net(x_func, x_loc)
+        #u0 = self.net(x_func, torch.zeros_like(x_loc))
+        #u = u - u0 + x_func[:,None,:]
+        
+        return u
                 
         
