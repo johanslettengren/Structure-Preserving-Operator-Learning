@@ -3,8 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch.autograd import grad
 
-
-
 # Fully connected neural network
 class FNN(torch.nn.Module):
     def __init__(self, layer_sizes, activation):
@@ -24,29 +22,17 @@ class FNN(torch.nn.Module):
             # Initialize biases (zeros)
             torch.nn.init.zeros_(layer.bias)
             self.linears.append(layer)
-        
-        
-    # Branch forward pass
-    def forward(self, momenta):
 
-        z = momenta
-        
-        for linear in self.linears[:-1]:
-            z = self.activation(linear(z))
-            
-        z = self.linears[-1](z)
-        return z
-
-class branch(torch.nn.Module):
-    def __init__(self, layer_sizes, dim, K, activation):
+# Fully connected neural network
+class gradientbranch(torch.nn.Module):
+    def __init__(self, layer_sizes, dim, activation):
         super().__init__()
         
         # Set activation function
         self.activation = activation
-        self.K = K
         self.dim = dim
                 
-        layer_sizes = [2] + layer_sizes + [dim*K]
+        layer_sizes = [dim] + layer_sizes + [1]
         # Create layers
         self.linears = torch.nn.ModuleList()
         for i in range(1, len(layer_sizes)):
@@ -59,11 +45,47 @@ class branch(torch.nn.Module):
         
     # Branch forward pass
     def forward(self, momenta):
+        
         z = momenta
         for linear in self.linears[:-1]:
             z = self.activation(linear(z))
             
-        z = self.linears[-1](z).view(-1, self.dim, self.K)
+        z = self.linears[-1](z)
+        
+        f = grad(z, momenta, grad_outputs=torch.ones_like(z), retain_graph=True)[0]
+                
+        return f
+
+class branch(torch.nn.Module):
+    def __init__(self, layer_sizes, dim, K, activation):
+        super().__init__()
+        
+        # Set activation function
+        self.activation = activation
+        self.dim = dim
+        self.K = K
+                
+        layer_sizes = [dim] + layer_sizes + [dim*K]
+        # Create layers
+        self.linears = torch.nn.ModuleList()
+        for i in range(1, len(layer_sizes)):
+            layer = torch.nn.Linear(layer_sizes[i - 1], layer_sizes[i])
+            # Initialize weights (normal distribution)
+            torch.nn.init.xavier_normal_(layer.weight)
+            # Initialize biases (zeros)
+            torch.nn.init.zeros_(layer.bias)
+            self.linears.append(layer)
+        
+    # Branch forward pass
+    def forward(self, momenta):
+        
+
+        
+        z = momenta
+        for linear in self.linears[:-1]:
+            z = self.activation(linear(z))
+            
+        z = self.linears[-1](z).view(*z.shape[:-1], self.dim, self.K)
              
 
         return z
@@ -99,30 +121,36 @@ class trunk(torch.nn.Module):
     
 # DeepONet class 
 class DeepONet(torch.nn.Module):
-    def __init__(self, layer_sizes_branch, layer_sizes_trunk, K=2, dim=2, activation='tanh', scheme=None, L=3, N=1):
+    def __init__(self, layer_sizes_branch, layer_sizes_trunk, K=2, N=1, activation='tanh', scheme=None, L=3):
         super(DeepONet, self).__init__()
         
         # Whether to QR factorise the branch
         self.scheme = scheme
-
-        activation = {'relu' : torch.relu, 'tanh':torch.tanh, 'softplus' : torch.nn.Softplus(), 'htanh' : torch.nn.Hardtanh()}[activation]   
         
-        self.dim = dim
-            
+        self.N = N
+        
+        I = torch.eye(N)
+        O = torch.zeros_like(I)
+
+        self.J = torch.cat([torch.cat([O, I], dim=1), torch.cat([-I, O], dim=1) ], dim=0)
+        #self.J = torch.zeros_like(self.J)
+
+        activation = {'relu' : torch.relu, 'tanh':torch.nn.Tanh(), 'softplus' : torch.nn.Softplus(), 'htanh' : torch.nn.Hardtanh()}[activation]   
             
         if scheme in ['preorth', 2]:
-            self.branch = FNN([2] + layer_sizes_branch + [2], activation)
+            self.branch = branch(layer_sizes_branch, dim=2*N, K=1, activation=activation)
             self.trunk = trunk(layer_sizes_trunk, K=K, activation=activation)        
 
         elif scheme in ['symplectic', 'symp', 3]:
-            self.branch = torch.nn.ModuleList([FNN([1] + layer_sizes_branch + [1], activation) for _ in range(L)]) 
-            self.trunk = trunk(layer_sizes_trunk, K=1, activation=activation)     
-            self.a = torch.nn.ParameterList([0.01*torch.nn.Parameter(torch.randn(2, )) for _ in range(L)])
-            self.J = torch.tensor([[0, 1], [-1, 0]], dtype=torch.float32)
             self.L = L
+            branch_net = branch(layer_sizes_branch, K=1, dim=1, activation=activation) 
+            self.branch = torch.nn.ModuleList([torch.nn.ModuleList([branch_net for _ in range(N)]) for _ in range(L)])
+            self.trunk = torch.nn.ModuleList([trunk(layer_sizes_trunk, K=1, activation=activation) for _ in range(L)])    
+            self.a = torch.nn.ParameterList([0.01 * torch.nn.Parameter(torch.randn(2,N)) for _ in range(L)])
+            
 
         else:  
-            self.branch = branch(layer_sizes_branch, dim=dim, K=K, activation=activation) 
+            self.branch = branch(layer_sizes_branch, dim=2*N, K=K, activation=activation) 
             self.trunk = trunk(layer_sizes_trunk, K=K, activation=activation)        
         
     
@@ -133,13 +161,14 @@ class DeepONet(torch.nn.Module):
         
         
         
+        
         if self.scheme in ['QR', 1]:
             trunk_outputs  = self.trunk(t)
             branch_outputs = self.branch(momenta)       
             # orthogonalise branch outputs
-            Q, R = torch.linalg.qr(branch_outputs)
+            Q, R = torch.linalg.qr(branch_outputs)            
             # Rescale (so that norm matches energy) and redefine branch outputs
-            branch_outputs = Q*torch.linalg.norm(momenta, dim=1, keepdim=True).unsqueeze(-1)
+            branch_outputs = Q*torch.linalg.norm(momenta, dim=-1)[:,None,None]
             # Find the corresponding coordinates
             trunk_outputs = torch.einsum("ukK,tK->utK", R, trunk_outputs)
             # Normalise and redfine trunk outputs
@@ -150,32 +179,51 @@ class DeepONet(torch.nn.Module):
         elif self.scheme in ['preorth', 2]:
             trunk_outputs  = self.trunk(t)
             branch_outputs = self.branch(momenta)       
-            b1 = self.branch(momenta)
-            J = torch.tensor([[0, 1], [-1, 0]], dtype=torch.float32)
-            b2 = torch.einsum ('id, dk -> ik', b1, J)
-            branch_outputs = torch.stack((b1, b2), axis=-1)     
+            b1 = self.branch(momenta).squeeze(-1)
+            #J = torch.tensor([[0, 1], [-1, 0]], dtype=torch.float32)
+
+            b2 = torch.einsum ('ud, dD -> uD', b1, self.J)
+            branch_outputs = torch.stack((b1, b2), axis=-1)    
+            
             trunk_outputs = torch.nn.functional.normalize(trunk_outputs, dim=-1)
             output = torch.einsum("udK,tK->utd", branch_outputs, trunk_outputs)   
             
         elif self.scheme in ['symplectic', 'symp', 3]:
             
+            
             momenta = momenta[:,None,:]
+            
+            
+        
             for i in range(self.L):
-                a = self.a[i]
-                alpha = self.trunk(t)[None, ...]
-                psi = self.branch[i](torch.einsum('utd, d -> ut', momenta, a)[...,None])
                 
-                momenta = momenta + alpha * (self.J @ a) * psi
+                
+                
+                a = self.a[i]
+                alpha = self.trunk[0](t)[None,...]
+                
+                
+                N = momenta.shape[-1]//2
+                
+                p = momenta[...,:N]
+                q = momenta[...,N:]                
+
+                arg = a[0,None,None,:] * p + a[1,None,None,:] * q                        
+                
+                
+                psi = torch.concatenate([self.branch[i][j](arg[...,None,j]).squeeze(-1) for j in range(N)], dim=-1)
+
+                branch = torch.concatenate((a[1,None,None,:]*psi, -a[0,None,None,:]*psi), axis=-1)
+                momenta = momenta + alpha * branch
                 
             output = momenta
                                             
         else:
             trunk_outputs  = self.trunk(t)
-            branch_outputs = self.branch(momenta)   
-            
-            print(branch_outputs.shape)    
+            trunk_outputs = torch.ones_like(trunk_outputs) #torch.nn.functional.normalize(trunk_outputs, dim=-1)
+            branch_outputs = self.branch(momenta)               
             output = torch.einsum("udK,tK->utd", branch_outputs, trunk_outputs)     
-    
+                
         return output
 
 
@@ -234,8 +282,8 @@ class Model():
             # Train
             self.optimizer.zero_grad()
             outputs = self.net(*self.x_train)   
+            
             loss = self.loss_fn(outputs, self.y_train)
-
 
             loss.backward()
             self.optimizer.step()
@@ -247,17 +295,17 @@ class Model():
                 self.net.eval()
                 
                 # Don't calculate gradients
-                with torch.no_grad():
+                # with torch.no_grad():
                     
                     
-                    outputs = self.net(*self.x_test)  
-                    vloss = self.loss_fn(outputs, self.y_test).item()
-                    
-                    announce_new_best = ''
-                    if vloss < self.bestloss:
-                        announce_new_best = 'New best model!'
-                        self.bestloss = vloss
-                        torch.save(self.net.state_dict(), "best_model.pth")  # Save model weights                    
+                outputs = self.net(*self.x_test)  
+                vloss = self.loss_fn(outputs, self.y_test).item()
+                
+                announce_new_best = ''
+                if vloss < self.bestloss:
+                    announce_new_best = 'New best model!'
+                    self.bestloss = vloss
+                    torch.save(self.net.state_dict(), "best_model.pth")  # Save model weights                    
                     
     
                 # Save loss history
