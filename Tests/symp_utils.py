@@ -3,6 +3,71 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 
 
+class ComplexSympNet(torch.nn.Module):
+    def __init__(self, layer_sizes, N, h, activation='tanh'):
+        super().__init__()
+
+        dict = {
+            'relu' : nn.ReLU(), 
+            'tanh' : nn.Tanh(), 
+            'softplus' : nn.Softplus(), 
+            'htanh' : nn.Hardtanh(), 
+            'sigmoid' : nn.Sigmoid(),
+            'hsigmoid' : nn.Hardsigmoid(), 
+            'tanhshrink' : nn.Tanhshrink()}  
+        
+        self.activation = dict[activation]   
+        
+        # Create layers
+        self.a = nn.ParameterList()
+        self.linears = nn.ModuleList()
+        self.biases = nn.ParameterList()
+        self.diags = nn.ParameterList()
+        
+        for i in range(len(layer_sizes)):
+            
+            real_layer = nn.Linear(N, layer_sizes[i], bias=True)
+            imag_layer = nn.Linear(N, layer_sizes[i], bias=True)
+            
+            nn.init.normal_(real_layer.weight, std=h)
+            nn.init.normal_(imag_layer.weight, std=h)
+            
+            nn.init.zeros_(real_layer.bias)
+            nn.init.zeros_(imag_layer.weight)
+            
+            self.linears.append(nn.ModuleList([real_layer, imag_layer]))
+            self.biases.append(nn.Parameter(torch.zeros(N))) 
+            self.diags.append(nn.Parameter(torch.randn(layer_sizes[i], 1)))
+            self.a.append(h * nn.Parameter(torch.randn(4)))
+
+    def forward(self, q, p):
+        
+        q_r, q_i, p_r, p_i = torch.real(q), torch.imag(q), torch.real(p), torch.imag(p)
+                        
+        for l in range(len(self.linears)):            
+            
+            a_r, a_i, b_r, b_i = self.a[l][0], self.a[l][1], self.a[l][2], self.a[l][3]
+            
+            real = (a_r * q_r - a_i * q_i) + (b_r * p_r - b_i * p_i)
+            imag = (a_r * q_i + a_i * q_r) + (b_r * p_i + b_i * p_r)
+            
+            real_ = self.activation(self.linears[l][0](real) - self.linears[l][1](imag))
+            imag_ = self.activation(self.linears[l][0](imag) + self.linears[l][1](real))
+                        
+            real = torch.matmul(real_, self.diags[l] * self.linears[l][0].weight) - torch.matmul(imag_, self.diags[l] * self.linears[l][1].weight) #+ self.biases[l][:,0]
+            imag = torch.matmul(imag_, self.diags[l] * self.linears[l][0].weight) + torch.matmul(real_, self.diags[l] * self.linears[l][1].weight) + self.biases[l]
+            
+            q_r = q_r + (b_r * real - b_i * imag)
+            q_i = q_i + (b_r * imag + b_i * real)
+            
+            p_r = p_r - (a_r * real - a_i * imag)
+            p_i = p_i - (a_r * imag + a_i * real)
+
+            q = q + q_r + 1j * q_i
+            p = p + p_r + 1j * p_i
+
+        return (q, p)
+
 class SympNet(torch.nn.Module):
     def __init__(self, layer_sizes, N, h, activation='tanh'):
         super().__init__()
@@ -34,7 +99,7 @@ class SympNet(torch.nn.Module):
             
             self.linears.append(layer)
             self.biases.append(nn.Parameter(torch.zeros(N)))    
-            self.diags.append(h * nn.Parameter(torch.rand(layer_sizes[i], 1)))
+            self.diags.append(nn.Parameter(torch.randn(layer_sizes[i], 1)))
             self.a.append(h * nn.Parameter(torch.randn(2)))
 
         
@@ -141,8 +206,6 @@ class FNN(torch.nn.Module):
             z = self.activation(linear(z))
             
         z = self.linears[-1](z)
- 
-    
 
         return (z[...,:N], z[...,N:])
 
@@ -158,21 +221,21 @@ class FNN(torch.nn.Module):
 # Compile and train model + data
 class SympModel():
     
-    def __init__(self, x_train, y_train, x_test, y_test, net, lr=0.001):  
+    def __init__(self, x_train, y_train, x_test, y_test, net, lr=0.001, loss='fourier'):  
                 
         # Training data
-        self.x_train = tuple(self.format(x, requires_grad=True) for x in x_train)
-        self.y_train = tuple(self.format(y) for y in y_train)
+        self.x_train = x_train
+        self.y_train = y_train
         
         # Testing data
-        self.x_test = tuple(self.format(x) for x in x_test)
-        self.y_test = tuple(self.format(y) for y in y_test)
+        self.x_test = x_test
+        self.y_test = y_test
                 
         self.bestvloss = torch.tensor(torch.inf)
         #self.bestloss = 1000000
         
-        self.scales = tuple(torch.mean(torch.abs(self.y_train[i]-self.x_train[i])**2) for i in range(2))
-                
+    
+                        
         # Network
         self.net = net
         
@@ -187,7 +250,55 @@ class SympModel():
         
         # Set loss function (MSE default)
         self.mse = torch.nn.MSELoss()
-        self.loss_fn = self.mse 
+        
+        if loss == 'fourier':
+            
+            self.loss = self.fourier_loss
+            self.imag_scale = torch.mean(torch.abs(self.y_train[0]-self.x_train[0])**2)
+            self.real_scale = torch.mean(torch.abs(self.y_train[1]-self.x_train[1])**2)
+            
+        elif loss == 'spatial':
+            
+            self.loss = self.spatial_loss
+            
+            u0 = torch.fft.ifft(self.x_train[1] + 1j * self.x_train[0]) / torch.sqrt(torch.tensor(2))
+            self.real_scale = torch.mean(torch.abs(self.y_train[0]-torch.real(u0))**2)
+            self.imag_scale = torch.mean(torch.abs(self.y_train[1]-torch.imag(u0))**2)        
+        
+        
+    # def mse(self, prediction, target):
+    #     return (torch.abs(prediction - target)**2).mean()  
+    
+    def rel_l2(self, prediction, target):
+        return torch.linalg.norm(prediction - target) / torch.linalg.norm(target)
+        
+    
+    def fourier_loss(self, output, target):
+        
+        x = torch.cat(output, axis=-1)
+        y = torch.cat(target, axis=-1)
+        
+        #imag_loss = self.mse(output[0], target[0]) / self.imag_scale
+        #real_loss = self.mse(output[1], target[1]) / self.real_scale
+
+        return self.rel_l2(x, y)
+    
+    def spatial_loss(self, output, target):
+        
+        x = torch.fft.ifft(output[1] + 1j * output[0]) / torch.sqrt(torch.tensor(2))
+        
+        #x = torch.cat((torch.real(u), torch.imag(u)), axis=-1)
+        y = target[0] + 1j * target[1]
+        #y = torch.cat(target, axis=-1)
+        
+        # real_loss = self.rel_l2(torch.real(u), target[0])
+        # imag_loss = self.rel_l2(torch.imag(u), target[1])
+        
+        # real_loss = self.mse(torch.real(u), target[0]) / self.real_scale
+        # imag_loss = self.mse(torch.imag(u), target[1]) / self.imag_scale
+        
+        return self.rel_l2(x, y)
+        
         
         
     # Format data as torch tensor with dtype=float32    
@@ -195,7 +306,7 @@ class SympModel():
         x = x if isinstance(x, torch.Tensor) else torch.tensor(x)
         return x.to(torch.float32).requires_grad_(requires_grad)
     
-        
+    
         
     # Train network
     def train(self, iterations):
@@ -204,26 +315,23 @@ class SympModel():
         self.steps = []
         self.net.train(True)
         
-        print('Step \t Train loss \t Test loss')
+        print('Step \t train loss     real loss      imag loss      test loss')
         
         for iter in range(iterations):
                                     
             # Train
             self.optimizer.zero_grad()
             
-            out = self.net(*self.x_train)  
-                        
-            loss = sum(self.loss_fn(out[i], self.y_train[i]) / self.scales[i] for i in range(2))
-                
-        
-            #loss = self.loss_fn(outputs, self.y_train)
+            out = self.net(*self.x_train) 
+            
+            loss = self.loss(out, self.y_train) 
 
             loss.backward(retain_graph=True)
             self.optimizer.step()
             tloss = loss.item()
 
             # Test
-            if iter % 100 == 99:
+            if iter % 1000 == 999:
                 # Set net to evalutation mode
                 self.net.eval()
                 
@@ -231,7 +339,7 @@ class SympModel():
                 with torch.no_grad():
                     
                     out = self.net(*self.x_test)  
-                    vloss = sum(self.loss_fn(out[i], self.y_test[i]) / self.scales[i] for i in range(2))
+                    vloss = self.loss(out, self.y_test)
                                         
                     announce_new_best = ''
                     if vloss < self.bestvloss:
@@ -246,7 +354,8 @@ class SympModel():
                     self.steps.append(iter)
                     self.net.train(True)
                 
-                print('{} \t [{:.2e}] \t [{:.2e}] \t {}'.format(iter + 1, tloss, vloss, announce_new_best))    
+                print('{} \t [{:.2e}]     [{:.2e}]  +  [{:.2e}]  =  [{:.2e}] \t {}'.\
+                    format(iter + 1, tloss, 0, 0, vloss, announce_new_best))    
                 
         print('Best testing loss:', self.bestvloss.item())
         self.net.load_state_dict(torch.load("best_model.pth", weights_only=True))
@@ -267,7 +376,7 @@ class SympModel():
             
             momenta = self.net(*momenta)
             q = torch.cat((q, momenta[0]), axis=0)
-            p = torch.cat((p, momenta[0]), axis=0)
+            p = torch.cat((p, momenta[1]), axis=0)
         
         return (q, p)
     
