@@ -70,7 +70,8 @@ class Model():
             outputs = self.net(*self.x_train)            
             
             # Calculate corresponding loss  
-            loss = self.loss(outputs, self.y_train)
+            loss = self.loss(outputs, self.y_train) 
+                #self.loss(torch.linalg.norm(outputs, axis=-1), torch.linalg.norm(self.x_train[1] + 1j * self.x_train[0], axis=-1))
             
             # Calculate gradients
             loss.backward()

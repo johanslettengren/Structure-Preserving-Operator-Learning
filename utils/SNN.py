@@ -15,7 +15,7 @@ class SNN(nn.Module):
         
         # possible activation functions
         # NN fits an activation using a neural network with ReLU activation
-        dict = {
+        self.activation = {
             'relu' : nn.ReLU(), 
             'tanh' : nn.Tanh(), 
             'softplus' : nn.Softplus(), 
@@ -24,9 +24,7 @@ class SNN(nn.Module):
             'hsigmoid' : nn.Hardsigmoid(), 
             'tanhshrink' : nn.Tanhshrink(),
             'abs' : torch.abs,
-            'NN' : FNN([1, 5, 5, 5, 1], 'relu')}  
-        
-        self.activation = dict[activation]  
+            'NN' : FNN([1, 5, 5, 5, 1], 'hsigmoid')}[activation] 
         
         # Linear layers
         self.linears = nn.ModuleList() 
@@ -147,7 +145,7 @@ class FNN(nn.Module):
         
         super().__init__()
         
-        dict = {
+        self.activation = {
             'relu' : nn.ReLU(), 
             'tanh' : nn.Tanh(), 
             'softplus' : nn.Softplus(), 
@@ -155,9 +153,7 @@ class FNN(nn.Module):
             'sigmoid' : nn.Sigmoid(),
             'hsigmoid' : nn.Hardsigmoid(), 
             'tanhshrink' : nn.Tanhshrink(),
-            'abs' : torch.abs}   
-        
-        self.activation = dict[activation] 
+            'abs' : torch.abs}[activation] 
                                 
         layer_sizes = layer_sizes
         
