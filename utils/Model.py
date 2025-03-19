@@ -101,7 +101,7 @@ class Model():
                         announce_new_best = 'New best model!'
                         
                         # Save current mode
-                        torch.save(self.net.state_dict(), "best_model.pth")    
+                        torch.save(self.net.state_dict(), "saves/best_model.pth")    
                         
                         # Update current best validation loss
                         self.bestvloss = vloss               
@@ -120,7 +120,7 @@ class Model():
                 print('{} \t [{:.2e}] \t [{:.2e}] \t {}'.format(iter + 1, tloss, vloss, announce_new_best))    
                 
         # Load the model with best validation loss
-        self.net.load_state_dict(torch.load("best_model.pth", weights_only=True))
+        self.net.load_state_dict(torch.load("saves/best_model.pth", weights_only=True))
         
         # Set network to evalutation mode (training done)
         self.net.eval()
