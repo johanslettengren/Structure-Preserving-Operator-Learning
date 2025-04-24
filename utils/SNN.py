@@ -24,7 +24,7 @@ class SNN(nn.Module):
             'hsigmoid' : nn.Hardsigmoid(), 
             'tanhshrink' : nn.Tanhshrink(),
             'abs' : torch.abs,
-            'NN' : FNN([1, 5, 5, 5, 1], 'hsigmoid')}[activation] 
+            'NN' : FNN([1, 10, 10, 10, 1], 'sigmoid')}[activation] 
         
         # Linear layers
         self.linears = nn.ModuleList() 
