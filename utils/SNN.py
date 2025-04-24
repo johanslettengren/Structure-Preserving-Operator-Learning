@@ -44,15 +44,15 @@ class SNN(nn.Module):
             self.D.append(nn.Parameter(torch.randn(layer_sizes[i], 1)))
             
             # Initialize at appropriate scale
-            self.a.append(s * nn.Parameter(torch.randn(2)))
+            self.a.append(nn.Parameter(torch.randn(2, N)))
             
     def forward(self, p, q):
         """Forward pass"""
         for l, linear in enumerate(self.linears):            
             
             # Get parameters a and b
-            a, b = self.a[l][0], self.a[l][1]  
-            
+            a, b = self.a[l][0,None,:], self.a[l][1,None,:]  
+
             # Linear combination of p and q
             z = a * p + b * q
                     
@@ -83,9 +83,9 @@ class SNN1D(nn.Module):
     def __init__(self, num_layers, NN_layer_size, h, activation):
         super().__init__() 
  
-        self.h = h
         self.a = nn.ParameterList()    
         self.layers = nn.ModuleList()
+        
                 
         # Create parameters
         for _ in range(num_layers):
@@ -104,16 +104,51 @@ class SNN1D(nn.Module):
             a, b = self.a[l][0], self.a[l][1]       
             
             # Take linear combination
-            z = a * p + b * q
+            z = b * p - a * q
         
             # Apply NN
             z = layer(z)
                         
             # Update accordingly
-            p = p + b * z
-            q = q - a * z
+            p = p + a * z
+            q = q + b * z
 
         return torch.cat((p, q), axis=-1)
+    
+    
+class QFIPRO(nn.Module):
+    """Rollout Net Built on Vanilla NN
+
+    Args:
+        layer_size : shape of NN
+        activation : nonlinear activation function
+    """
+    def __init__(self, layer_sizes, activation, h):
+        
+        super().__init__()
+        
+        self.h = h
+        self.NN = FNN(layer_sizes, activation)
+            
+    def forward(self, p, q):
+        """Forward pass"""
+        z = torch.cat((p, q), axis=-1)
+        
+        
+        N = self.NN(z)
+        
+        normsquare = (torch.linalg.norm(z, axis=-1)**2)[:,None] / 2
+            
+        inner = torch.einsum('...d, ...d -> ...',   N, z)[:,None] / 2    
+        
+        N = N - inner * z / normsquare
+        
+        z = z + self.h * torch.sqrt(normsquare) * N
+                
+        scale_factor = 1 / torch.sqrt(1 + self.h**2 * torch.linalg.norm(N, axis=-1)**2 / 2)[:,None]
+        
+        
+        return scale_factor * z
 
 class vRO(nn.Module):
     """Rollout Net Built on Vanilla NN
@@ -122,9 +157,11 @@ class vRO(nn.Module):
         layer_size : shape of NN
         activation : nonlinear activation function
     """
-    def __init__(self, layer_sizes, activation):
+    def __init__(self, layer_sizes, activation, h):
         
         super().__init__()
+        
+        self.h = h
         
         self.NN = FNN(layer_sizes, activation)
             
@@ -132,7 +169,7 @@ class vRO(nn.Module):
         """Forward pass"""
         z = torch.cat((p, q), axis=-1)
         
-        return self.NN(z)
+        return z + self.h * self.NN(z)
     
 class FNN(nn.Module):
     """Fully Connected Neural Network

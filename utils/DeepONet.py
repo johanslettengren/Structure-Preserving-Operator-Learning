@@ -189,7 +189,7 @@ class DeepONet(nn.Module):
             Q, R = torch.linalg.qr(branch_outputs)    
                 
             # Rescale branch to match inital norm
-            branch_outputs = Q*torch.linalg.norm(iv, dim=-1)[:,None,None]
+            branch_outputs = Q * torch.linalg.norm(iv, dim=-1)[:,None,None]
             
             # Transform trunk coordinates to match the new branch vectors
             trunk_outputs = torch.einsum("ukK,tK->utK", R, trunk_outputs)
@@ -276,3 +276,22 @@ class ComplexDeepONet(nn.Module):
             out = torch.einsum("udK,tK->utd", B, trunk)
         
         return torch.cat((torch.imag(out), torch.real(out)), axis=-1)
+    
+    
+def DeepONet_rollout(net, iv, Tmax, T, h):
+
+        """Roll out prediction"""
+        
+        t = torch.linspace(0, T, int(T / h)+1, dtype=torch.float32)[1:]
+        k = int(torch.ceil(torch.tensor(Tmax / T)))
+                
+        pred = iv[:,None,:]
+        
+        for _ in range(k):
+        
+            u = net(iv, t[:,None])
+            iv = u[:, -1, :]
+            
+            pred = torch.cat((pred, u), axis=1)
+        
+        return pred
