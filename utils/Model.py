@@ -13,7 +13,7 @@ class Model():
         lr : learning rate of optimiser
         val_interval : number of iterations between validations
     """
-    def __init__(self, x_train, y_train, x_test, y_test, net, loss=torch.nn.MSELoss, lr=0.001, val_interval=100):  
+    def __init__(self, x_train, y_train, x_test, y_test, net, lr=0.001, val_interval=100):  
         
         # Training data
         self.x_train = (self.format(x_train[0], requires_grad=True), self.format(x_train[1], requires_grad=True))
@@ -25,7 +25,6 @@ class Model():
                 
         # For saving the best validation loss
         self.bestvloss = 1000000
-        self.besttloss = 1000000
         
         # Network
         self.net = net
@@ -39,7 +38,7 @@ class Model():
         self.optimizer = optimizer(net.parameters(), lr=lr)
         
         # Set MSE loss function
-        self.loss = loss
+        self.loss = torch.nn.MSELoss()
         
         # Number of iterations between validations
         self.val_interval = val_interval
@@ -49,7 +48,7 @@ class Model():
         x = x if isinstance(x, torch.Tensor) else torch.tensor(x)
         return x.to(torch.float32).requires_grad_(requires_grad)
         
-    def train(self, iterations, verbose=True):
+    def train(self, iterations):
         """Train network"""
         
         # Train step history
@@ -59,8 +58,7 @@ class Model():
         self.net.train(True)
         
         # For displaying losses upon validation
-        if verbose:
-            print('Step \t Train loss \t Test loss')
+        print('Step \t Train loss \t Test loss')
         
         for iter in range(iterations):
             """Training iteration"""    
@@ -72,8 +70,7 @@ class Model():
             outputs = self.net(*self.x_train)            
             
             # Calculate corresponding loss  
-            loss = self.loss(outputs, self.y_train) 
-            #self.loss(torch.linalg.norm(outputs, axis=-1), torch.linalg.norm(self.x_train[1] + 1j * self.x_train[0], axis=-1))
+            loss = self.loss(outputs, self.y_train)
             
             # Calculate gradients
             loss.backward()
@@ -104,13 +101,10 @@ class Model():
                         announce_new_best = 'New best model!'
                         
                         # Save current mode
-                        torch.save(self.net.state_dict(), "saves/best_model.pth")    
+                        torch.save(self.net.state_dict(), "best_model.pth")    
                         
                         # Update current best validation loss
-                        self.bestvloss = vloss   
-                        
-                    if loss < self.besttloss:
-                        self.besttloss = loss          
+                        self.bestvloss = vloss               
                         
         
                     # Save loss history
@@ -123,11 +117,10 @@ class Model():
                     self.net.train(True)
                 
                 # Display losses at vaildation iteration
-                if verbose:
-                    print('{} \t [{:.2e}] \t [{:.2e}] \t {}'.format(iter + 1, tloss, vloss, announce_new_best))    
+                print('{} \t [{:.2e}] \t [{:.2e}] \t {}'.format(iter + 1, tloss, vloss, announce_new_best))    
                 
         # Load the model with best validation loss
-        self.net.load_state_dict(torch.load("saves/best_model.pth", weights_only=True))
+        self.net.load_state_dict(torch.load("best_model.pth", weights_only=True))
         
         # Set network to evalutation mode (training done)
         self.net.eval()
@@ -136,12 +129,12 @@ class Model():
     def plot_losshistory(self, dpi=100):
         # Plot the loss trajectory
         _, ax = plt.subplots(figsize=(8, 2), dpi=dpi)
-        ax.plot(self.steps, self.tlosshistory, 'tab:blue', linewidth=3, label='Train')
-        ax.plot(self.steps, self.vlosshistory, 'tab:orange', linewidth=3, linestyle='--', label='Validation')
+        ax.plot(self.steps, self.tlosshistory, '.-', label='Training loss')
+        ax.plot(self.steps, self.vlosshistory, '.-', label='Test loss')
         ax.set_title("Training Loss History")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.set_yscale('log')
         ax.grid(True)
-        ax.legend(loc='best')
+        ax.legend()
         plt.show()   
